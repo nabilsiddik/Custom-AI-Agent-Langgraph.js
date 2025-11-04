@@ -3,45 +3,52 @@ import readline from 'node:readline/promises'
 import { ChatGroq } from "@langchain/groq";
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { TavilySearch } from "@langchain/tavily"
+import { MemorySaver } from '@langchain/langgraph';
+
+
+const checkPointer = new MemorySaver()
 
 // Tavily web search tool
 const webSearchTool = new TavilySearch({
-  maxResults: 3,
-  topic: "general",
-  // includeAnswer: false,
-  // includeRawContent: false,
-  // includeImages: false,
-  // includeImageDescriptions: false,
-  // searchDepth: "basic",
-  // timeRange: "day",
-  // includeDomains: [],
-  // excludeDomains: [],
+    maxResults: 3,
+    topic: "general",
+    // includeAnswer: false,
+    // includeRawContent: false,
+    // includeImages: false,
+    // includeImageDescriptions: false,
+    // searchDepth: "basic",
+    // timeRange: "day",
+    // includeDomains: [],
+    // excludeDomains: [],
 });
 
 // Initialise the tool node
 const tools = [webSearchTool]
 const toolNode = new ToolNode(tools)
 
-async function callModel(state) {
-    console.log('Calling LLM')
+const threads = {};
 
-    const llm = new ChatGroq({
-        model: "openai/gpt-oss-120b",
-        temperature: 0
-    }).bindTools(tools)
+async function callModel(state, thread_id = "1") {
+    const history = threads[thread_id] || [];
 
-    const response = await llm.invoke(state.messages)
+    const llm = new ChatGroq({ model: "openai/gpt-oss-120b", temperature: 0 })
+        .bindTools(tools);
 
-    return {messages: [response]}
+    const allMessages = [...history, ...state.messages];
+
+    const response = await llm.invoke(allMessages);
+
+    // save response to history
+    threads[thread_id] = [...allMessages, response];
+
+    return { messages: [response] };
 }
 
-function shouldContinue(state){
+function shouldContinue(state) {
     // Put condition weather call a tool or  not
-    console.log('state', state)
     const lastMessage = state.messages[state.messages.length - 1]
-    const isToolCallingMandatory = lastMessage.tool_calls.length > 0
 
-    if(isToolCallingMandatory){
+    if (lastMessage.tool_calls.length > 0) {
         return 'tools'
     }
 
@@ -51,13 +58,13 @@ function shouldContinue(state){
 // Build the graph
 const workflow = new StateGraph(MessagesAnnotation)
     .addNode('agent', callModel)
-    .addNode('tool', ToolNode)
+    .addNode('tools', toolNode)
     .addEdge('__start__', 'agent')
+    .addEdge('tools', 'agent')
     .addConditionalEdges('agent', shouldContinue)
-    .addEdge('agent', '__end__')
 
 // compine the graph
-const app = workflow.compile()
+const app = workflow.compile({ checkPointer })
 
 async function main() {
     const rl = readline.createInterface({
@@ -70,8 +77,8 @@ async function main() {
         if (userInput === '/bye') break
 
         const finalState = await app.invoke({
-            messages: [{ role: 'user', content: userInput }]
-        })
+            messages: [{ role: 'human', content: userInput }]
+        }, { configurable: { thread_id: "1" } })
 
         const lastMessage = finalState.messages[finalState.messages.length - 1]
 
